@@ -103,19 +103,104 @@ app.get('/api/metadata', (req, res) => {
 app.delete('/api/tests/:id', (req, res) => {
     const { id } = req.params;
 
-    db.run(
-        `DELETE FROM tests WHERE id = ?`,
-        [id],
-        function(err) {
-            if (err) {
-                return res.status(500).json({ error: err.message });
-            }
-            if (this.changes === 0) {
-                return res.status(404).json({ error: 'Test not found' });
-            }
-            res.json({ success: true });
-        }
-    );
+    // Сначала получаем данные теста, который будем удалять
+    db.get(`SELECT topic, section FROM tests WHERE id = ?`, [id], (err, test) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (!test) return res.status(404).json({ error: 'Test not found' });
+
+        // Удаляем сам тест
+        db.run(`DELETE FROM tests WHERE id = ?`, [id], function(err) {
+            if (err) return res.status(500).json({ error: err.message });
+
+            // Проверяем, остались ли тесты с этой темой
+            db.get(
+                `SELECT COUNT(*) as count FROM tests WHERE topic = ?`,
+                [test.topic],
+                (err, result) => {
+                    if (err) return res.status(500).json({ error: err.message });
+
+                    // Если это был последний тест с такой темой - удаляем тему из метаданных
+                    if (result.count === 0) {
+                        db.run(
+                            `DELETE FROM metadata WHERE type = 'topic' AND value = ?`,
+                            [test.topic]
+                        );
+                    }
+
+                    // Аналогично для раздела
+                    db.get(
+                        `SELECT COUNT(*) as count FROM tests WHERE section = ?`,
+                        [test.section],
+                        (err, result) => {
+                            if (result.count === 0) {
+                                db.run(
+                                    `DELETE FROM metadata WHERE type = 'section' AND value = ?`,
+                                    [test.section]
+                                );
+                            }
+                            res.json({ success: true });
+                        }
+                    );
+                }
+            );
+        });
+    });
+});
+
+// Роут для получения уникальных тем
+app.get('/api/topics', (req, res) => {
+    db.all(`SELECT DISTINCT topic FROM tests ORDER BY topic`, [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows.map(row => row.topic));
+    });
+});
+
+// Роут для получения уникальных разделов по теме
+app.get('/api/sections', (req, res) => {
+    const { topic } = req.query;
+    let query = `SELECT DISTINCT section FROM tests`;
+    const params = [];
+
+    if (topic) {
+        query += ` WHERE topic = ?`;
+        params.push(topic);
+    }
+
+    query += ` ORDER BY section`;
+
+    db.all(query, params, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows.map(row => row.section));
+    });
+});
+
+// Роут для получения отфильтрованных тестов
+app.get('/api/tests/filtered', (req, res) => {
+    const { topic, section } = req.query;
+    let query = `SELECT * FROM tests`;
+    const params = [];
+    const conditions = [];
+
+    if (topic) {
+        conditions.push(`topic = ?`);
+        params.push(topic);
+    }
+
+    if (section) {
+        conditions.push(`section = ?`);
+        params.push(section);
+    }
+
+    if (conditions.length) {
+        query += ` WHERE ` + conditions.join(' AND ');
+    }
+
+    query += ` ORDER BY createdAt DESC`;
+
+    db.all(query, params, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
 });
 
 // Запуск сервера
